@@ -365,22 +365,78 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /help"""
     await update.message.reply_text(
-        "🏆 **Bot LoL Esports - Ajuda**\n\n"
-        "**Comandos:**\n"
+        "🏆 *Bot LoL Esports - Ajuda*\n\n"
+        "*Comandos:*\n"
         "/live - Ver partidas ao vivo\n"
-        "/help - Esta mensagem\n\n"
-        "**Ligas Monitoradas:**\n"
-        "🇰🇷 LCK (Korea)\n"
-        "🇨🇳 LPL (China)\n"
-        "🇪🇺 LEC (Europa)\n"
-        "🇺🇸 LCS (América do Norte)\n"
-        "🇧🇷 CBLOL (Brasil)\n\n"
-        "**Como usar:**\n"
-        "1. Use /live para ver jogos\n"
-        "2. Clique em 'Analisar' para ver stats\n"
-        "3. Use 'Atualizar' para refresh",
+        "/help - Esta mensagem\n"
+        "/debug - Ver dados brutos da API\n\n"
+        "*Ligas Monitoradas:*\n"
+        "🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC • 🇺🇸 LCS • 🇧🇷 CBLOL",
         parse_mode='Markdown'
     )
+
+async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Mostra dados brutos da API para debug"""
+    msg = await update.message.reply_text("🔍 Buscando dados brutos...")
+    
+    try:
+        matches = await api.get_live_matches()
+        
+        if not matches:
+            await msg.edit_text("❌ Nenhuma partida ao vivo agora.")
+            return
+        
+        # Pegar primeiro jogo disponível
+        first_match = matches[0]
+        match_obj = first_match.get('match', {})
+        games = match_obj.get('games', [])
+        
+        current_game = next((g for g in games if g.get('state') == 'inProgress'), None)
+        
+        if not current_game:
+            await msg.edit_text("❌ Nenhum jogo em andamento.")
+            return
+        
+        game_id = current_game.get('id')
+        
+        # Buscar stats brutas
+        stats = await api.get_live_stats(game_id)
+        
+        if not stats:
+            await msg.edit_text("❌ Stats não disponíveis.")
+            return
+        
+        # Pegar último frame
+        frames = stats.get('frames', [])
+        if not frames:
+            await msg.edit_text("❌ Sem frames disponíveis.")
+            return
+        
+        latest = frames[-1]
+        
+        # Mostrar TODOS os campos disponíveis
+        blue = latest.get('blueTeam', {})
+        red = latest.get('redTeam', {})
+        
+        debug_text = "🔍 *CAMPOS DISPONÍVEIS NA API:*\n\n"
+        debug_text += "*🔵 Blue Team campos:*\n"
+        for key, value in blue.items():
+            if not isinstance(value, (list, dict)):
+                debug_text += f"`{key}`: {value}\n"
+        
+        debug_text += "\n*🔴 Red Team campos:*\n"
+        for key, value in red.items():
+            if not isinstance(value, (list, dict)):
+                debug_text += f"`{key}`: {value}\n"
+        
+        # Enviar em partes se for muito grande
+        if len(debug_text) > 4000:
+            debug_text = debug_text[:4000] + "\n...(truncado)"
+        
+        await msg.edit_text(debug_text, parse_mode='Markdown')
+        
+    except Exception as e:
+        await msg.edit_text(f"❌ Erro: {str(e)}")
 
 # ========================================
 # MAIN
@@ -398,6 +454,7 @@ def main():
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("live", live))
     application.add_handler(CommandHandler("help", help_command))
+    application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CallbackQueryHandler(analyze_callback, pattern="^analyze_"))
     
     # Rodar
