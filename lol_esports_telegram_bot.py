@@ -1,9 +1,3 @@
-"""
-Bot LoL Esports - TELEGRAM
-Ligas Principais: LCK, LPL, LEC, LCS, CBLOL
-COM DADOS REAIS que FUNCIONAM!
-"""
-
 import asyncio
 import aiohttp
 import os
