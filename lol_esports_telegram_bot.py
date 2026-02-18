@@ -1,9 +1,16 @@
+"""
+Bot LoL Esports - TELEGRAM v2
+COM WEB SCRAPING DOS DADOS REAIS!
+Extrai direto da mesma fonte que lolesports.com usa
+"""
+
 import asyncio
 import aiohttp
 import os
 from datetime import datetime
 from typing import Dict, List, Optional
 import math
+import json
 
 # Telegram Bot
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -13,39 +20,37 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # CONFIGURAÇÃO
 # ========================================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'SEU_TOKEN_TELEGRAM_AQUI')
-RIOT_API_KEY = os.getenv('RIOT_API_KEY', 'SUA_RIOT_API_KEY_AQUI')
 
-# APIs
+# APIs do LoL Esports (mesmas que o site usa!)
 ESPORTS_API = "https://esports-api.lolesports.com/persisted/gw"
-ESPORTS_FEED = "https://feed.lolesports.com/livestats/v1"
+LIVE_STATS_API = "https://feed.lolesports.com/livestats/v1"
 
-ESPORTS_HEADERS = {
-    'x-api-key': '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z',
-    'User-Agent': 'Mozilla/5.0'
+# Headers corretos (igual ao site)
+HEADERS = {
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
+    'Accept': 'application/json',
+    'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
+    'Origin': 'https://lolesports.com',
+    'Referer': 'https://lolesports.com/',
+    'x-api-key': '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z'
 }
 
 # Ligas principais
-MAIN_LEAGUES = {
-    'LCK': '98767975604431411',
-    'LPL': '98767991302996019', 
-    'LEC': '98767991299243165',
-    'LCS': '98767991325878492',
-    'CBLOL': '98767991332355509'
-}
+MAIN_LEAGUES = ['LCK', 'LPL', 'LEC', 'LCS', 'CBLOL', 'Worlds', 'MSI']
 
-class EsportsAPI:
-    """Cliente para LoL Esports API"""
+class LoLEsportsAPI:
+    """API que replica o comportamento do lolesports.com"""
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def get_session(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(headers=ESPORTS_HEADERS)
+            self.session = aiohttp.ClientSession(headers=HEADERS)
         return self.session
     
-    async def get_live_matches(self) -> List[Dict]:
-        """Busca partidas ao vivo"""
+    async def get_live_games(self) -> List[Dict]:
+        """Busca jogos ao vivo (igual ao site)"""
         session = await self.get_session()
         url = f"{ESPORTS_API}/getLive?hl=pt-BR"
         
@@ -55,31 +60,25 @@ class EsportsAPI:
                     data = await response.json()
                     events = data.get('data', {}).get('schedule', {}).get('events', [])
                     
-                    # Filtrar apenas ligas principais
-                    main_events = []
+                    # Filtrar apenas em andamento e ligas principais
+                    live_events = []
                     for event in events:
                         if event.get('state') != 'inProgress':
                             continue
                         
-                        league = event.get('league', {})
-                        league_slug = league.get('slug', '')
-                        
-                        # Verificar se é liga principal
-                        is_main = any(
-                            main.lower() in league_slug.lower() 
-                            for main in MAIN_LEAGUES.keys()
-                        )
+                        league_name = event.get('league', {}).get('name', '')
+                        is_main = any(league in league_name for league in MAIN_LEAGUES)
                         
                         if is_main:
-                            main_events.append(event)
+                            live_events.append(event)
                     
-                    return main_events
+                    return live_events
         except Exception as e:
-            print(f"Erro ao buscar partidas: {e}")
+            print(f"❌ Erro ao buscar jogos: {e}")
         
         return []
     
-    async def get_event_details(self, event_id: str) -> Optional[Dict]:
+    async def get_game_details(self, event_id: str) -> Optional[Dict]:
         """Busca detalhes do evento"""
         session = await self.get_session()
         url = f"{ESPORTS_API}/getEventDetails?hl=pt-BR&id={event_id}"
@@ -90,21 +89,32 @@ class EsportsAPI:
                     data = await response.json()
                     return data.get('data', {}).get('event', {})
         except Exception as e:
-            print(f"Erro ao buscar evento: {e}")
+            print(f"❌ Erro nos detalhes: {e}")
         
         return None
     
-    async def get_live_stats(self, game_id: str) -> Optional[Dict]:
-        """Busca stats em tempo real"""
+    async def get_live_window(self, game_id: str) -> Optional[Dict]:
+        """
+        Busca stats AO VIVO - A FORMA CORRETA!
+        Usa o endpoint /window/ que o site usa
+        """
         session = await self.get_session()
-        url = f"{ESPORTS_FEED}/window/{game_id}"
+        url = f"{LIVE_STATS_API}/window/{game_id}"
         
         try:
-            async with session.get(url) as response:
+            async with session.get(url, headers=HEADERS) as response:
                 if response.status == 200:
-                    return await response.json()
+                    data = await response.json()
+                    
+                    # DEBUG: Mostrar o que chegou
+                    print(f"✅ Stats recebidas para jogo {game_id}")
+                    print(f"   Frames: {len(data.get('frames', []))}")
+                    
+                    return data
+                else:
+                    print(f"⚠️ Status {response.status} ao buscar stats")
         except Exception as e:
-            print(f"Stats não disponíveis: {e}")
+            print(f"❌ Erro ao buscar window: {e}")
         
         return None
     
@@ -112,52 +122,127 @@ class EsportsAPI:
         if self.session and not self.session.closed:
             await self.session.close()
 
-class MatchAnalyzer:
-    """Analisador de partidas"""
+class StatsExtractor:
+    """Extrai stats dos dados retornados - VERSÃO CORRIGIDA"""
     
-    def analyze(self, stats: Dict) -> Optional[Dict]:
-        """Analisa stats e retorna resumo"""
+    def extract_stats(self, live_data: Dict) -> Optional[Dict]:
+        """
+        Extrai stats do formato REAL da API
+        """
         try:
-            frames = stats.get('frames', [])
-            if not frames:
+            frames = live_data.get('frames', [])
+            
+            if not frames or len(frames) == 0:
+                print("⚠️ Sem frames disponíveis")
                 return None
             
-            latest = frames[-1]
+            # Último frame = estado atual
+            latest_frame = frames[-1]
             
-            # Teams
-            blue = latest.get('blueTeam', {})
-            red = latest.get('redTeam', {})
+            print(f"🔍 Processando frame com {len(latest_frame.keys())} campos")
             
-            # Dados
-            blue_gold = blue.get('totalGold', 0)
-            red_gold = red.get('totalGold', 0)
+            # Pegar dados dos times
+            # A API pode usar 'blueTeam'/'redTeam' OU 'participants' agrupados
+            blue_team = latest_frame.get('blueTeam', {})
+            red_team = latest_frame.get('redTeam', {})
             
-            blue_kills = blue.get('totalKills', 0)
-            red_kills = red.get('totalKills', 0)
+            # Se não tiver blueTeam/redTeam, tentar extrair de participants
+            if not blue_team or not red_team:
+                participants = latest_frame.get('participants', [])
+                if participants:
+                    # Agrupar por teamId
+                    blue_team = self._aggregate_team(participants, 100)
+                    red_team = self._aggregate_team(participants, 200)
             
-            blue_towers = blue.get('towersDestroyed', 0)
-            red_towers = red.get('towersDestroyed', 0)
+            # Extrair campos (tentando TODOS os nomes possíveis)
+            blue_gold = (
+                blue_team.get('totalGold') or 
+                blue_team.get('gold') or 
+                blue_team.get('goldEarned') or 0
+            )
             
-            blue_dragons = blue.get('dragonsKilled', 0)
-            red_dragons = red.get('dragonsKilled', 0)
+            red_gold = (
+                red_team.get('totalGold') or 
+                red_team.get('gold') or 
+                red_team.get('goldEarned') or 0
+            )
             
-            blue_barons = blue.get('baronsKilled', 0)
-            red_barons = red.get('baronsKilled', 0)
+            blue_kills = (
+                blue_team.get('totalKills') or 
+                blue_team.get('kills') or 
+                blue_team.get('championKills') or 0
+            )
             
-            # Tempo
-            game_metadata = stats.get('gameMetadata', {})
+            red_kills = (
+                red_team.get('totalKills') or 
+                red_team.get('kills') or 
+                red_team.get('championKills') or 0
+            )
+            
+            # Torres
+            blue_towers = (
+                blue_team.get('towersDestroyed') or
+                blue_team.get('towers') or
+                blue_team.get('towerKills') or 0
+            )
+            
+            red_towers = (
+                red_team.get('towersDestroyed') or
+                red_team.get('towers') or
+                red_team.get('towerKills') or 0
+            )
+            
+            # Dragões
+            blue_dragons = (
+                blue_team.get('dragonsKilled') or
+                blue_team.get('dragons') or
+                blue_team.get('dragonKills') or 0
+            )
+            
+            red_dragons = (
+                red_team.get('dragonsKilled') or
+                red_team.get('dragons') or
+                red_team.get('dragonKills') or 0
+            )
+            
+            # Barões
+            blue_barons = (
+                blue_team.get('baronsKilled') or
+                blue_team.get('barons') or
+                blue_team.get('baronKills') or 0
+            )
+            
+            red_barons = (
+                red_team.get('baronsKilled') or
+                red_team.get('barons') or
+                red_team.get('baronKills') or 0
+            )
+            
+            # Tempo de jogo
+            game_time = latest_frame.get('rfc460Timestamp', 0)
+            
+            # DEBUG
+            print(f"💰 Ouro: Blue={blue_gold} Red={red_gold}")
+            print(f"⚔️ Kills: Blue={blue_kills} Red={red_kills}")
+            print(f"🏰 Torres: Blue={blue_towers} Red={red_towers}")
+            
+            # Se TUDO está zerado, retornar None
+            total = blue_gold + red_gold + blue_kills + red_kills
+            if total == 0:
+                print("⚠️ Todos os valores estão zerados - dados ainda não disponíveis")
+                return None
             
             # Calcular vantagem
             gold_diff = blue_gold - red_gold
             
             # Probabilidade
-            score = (gold_diff / 50000) + ((blue_towers - red_towers) / 11) + ((blue_kills - red_kills) / 20)
+            score = (gold_diff / 50000) + ((blue_towers - red_towers) / 11)
             blue_prob = 50 + (50 * math.tanh(score * 2))
             red_prob = 100 - blue_prob
             
             # Resumo
             if abs(gold_diff) < 1000:
-                advantage = "⚖️ Jogo equilibrado"
+                advantage = "⚖️ Equilibrado"
             elif gold_diff > 3000:
                 advantage = f"🔵 Blue dominando (+{gold_diff:,}g)"
             elif gold_diff < -3000:
@@ -181,16 +266,36 @@ class MatchAnalyzer:
                 'gold_diff': gold_diff,
                 'blue_prob': blue_prob,
                 'red_prob': red_prob,
-                'advantage': advantage
+                'advantage': advantage,
+                'game_time': game_time
             }
             
         except Exception as e:
-            print(f"Erro ao analisar: {e}")
+            print(f"❌ Erro ao extrair stats: {e}")
+            import traceback
+            traceback.print_exc()
             return None
+    
+    def _aggregate_team(self, participants: List[Dict], team_id: int) -> Dict:
+        """Agrega stats de participants por time"""
+        team_stats = {
+            'totalGold': 0,
+            'totalKills': 0,
+            'towersDestroyed': 0,
+            'dragonsKilled': 0,
+            'baronsKilled': 0
+        }
+        
+        for p in participants:
+            if p.get('teamId') == team_id:
+                team_stats['totalGold'] += p.get('totalGold', 0)
+                team_stats['totalKills'] += p.get('championKills', 0)
+        
+        return team_stats
 
 # Instâncias
-api = EsportsAPI()
-analyzer = MatchAnalyzer()
+api = LoLEsportsAPI()
+extractor = StatsExtractor()
 
 # ========================================
 # COMANDOS TELEGRAM
@@ -199,84 +304,76 @@ analyzer = MatchAnalyzer()
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     """Comando /start"""
     await update.message.reply_text(
-        "🏆 **Bot LoL Esports**\n\n"
-        "Acompanhe partidas profissionais em tempo real!\n\n"
-        "**Comandos:**\n"
+        "🏆 *Bot LoL Esports v2*\n\n"
+        "Bot com extração REAL de dados!\n\n"
+        "*Comandos:*\n"
         "/live - Ver jogos ao vivo\n"
         "/help - Ajuda\n\n"
-        "**Ligas:** LCK • LPL • LEC • LCS • CBLOL",
+        "*Ligas:* LCK • LPL • LEC • LCS • CBLOL",
         parse_mode='Markdown'
     )
 
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /live - Lista jogos ao vivo"""
-    msg = await update.message.reply_text("🔍 Buscando partidas ao vivo...")
+    """Lista jogos ao vivo"""
+    msg = await update.message.reply_text("🔍 Buscando jogos...")
     
     try:
-        matches = await api.get_live_matches()
+        games = await api.get_live_games()
         
-        if not matches:
+        if not games:
             await msg.edit_text(
-                "❌ **Nenhuma partida ao vivo**\n\n"
-                "Ligas monitoradas:\n"
-                "🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC\n"
-                "🇺🇸 LCS • 🇧🇷 CBLOL",
+                "❌ *Nenhum jogo principal ao vivo*\n\n"
+                "Ligas: 🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC • 🇺🇸 LCS • 🇧🇷 CBLOL",
                 parse_mode='Markdown'
             )
             return
         
-        # Criar mensagem
-        text = "🔴 **PARTIDAS AO VIVO**\n\n"
-        
+        text = "🔴 *JOGOS AO VIVO*\n\n"
         keyboard = []
         
-        for match in matches[:10]:
-            league = match.get('league', {}).get('name', 'Unknown')
-            match_obj = match.get('match', {})
-            teams = match_obj.get('teams', [])
+        for game in games[:10]:
+            league = game.get('league', {}).get('name', 'Unknown')
+            match = game.get('match', {})
+            teams = match.get('teams', [])
             
             if len(teams) >= 2:
-                team1 = teams[0].get('code', 'T1')
-                team2 = teams[1].get('code', 'T2')
-                event_id = match.get('id')
+                t1 = teams[0].get('code', 'T1')
+                t2 = teams[1].get('code', 'T2')
+                event_id = game.get('id')
                 
-                text += f"**{league}**\n"
-                text += f"{team1} vs {team2}\n\n"
+                text += f"*{league}*\n{t1} vs {t2}\n\n"
                 
-                # Botão para analisar
                 keyboard.append([
                     InlineKeyboardButton(
-                        f"📊 Analisar {team1} vs {team2}",
+                        f"📊 {t1} vs {t2}",
                         callback_data=f"analyze_{event_id}"
                     )
                 ])
         
-        reply_markup = InlineKeyboardMarkup(keyboard)
-        
         await msg.edit_text(
             text,
             parse_mode='Markdown',
-            reply_markup=reply_markup
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
         
     except Exception as e:
         await msg.edit_text(f"❌ Erro: {str(e)}")
 
 async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Callback para análise de partida"""
+    """Analisa jogo"""
     query = update.callback_query
     await query.answer()
     
     event_id = query.data.replace('analyze_', '')
     
-    await query.edit_message_text("📊 Analisando partida...")
+    await query.edit_message_text("📊 Extraindo dados ao vivo...")
     
     try:
         # Buscar detalhes
-        event = await api.get_event_details(event_id)
+        event = await api.get_game_details(event_id)
         
         if not event:
-            await query.edit_message_text("❌ Partida não encontrada")
+            await query.edit_message_text("❌ Evento não encontrado")
             return
         
         match_data = event.get('match', {})
@@ -284,68 +381,67 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         games = match_data.get('games', [])
         league = event.get('league', {}).get('name', 'Unknown')
         
-        team1_name = teams[0].get('name', 'Team 1') if len(teams) > 0 else 'Team 1'
-        team2_name = teams[1].get('name', 'Team 2') if len(teams) > 1 else 'Team 2'
+        t1_name = teams[0].get('name', 'Blue') if len(teams) > 0 else 'Blue'
+        t2_name = teams[1].get('name', 'Red') if len(teams) > 1 else 'Red'
         
-        # Buscar jogo em andamento
-        current_game = next((g for g in games if g.get('state') == 'inProgress'), None)
+        # Jogo em andamento
+        current = next((g for g in games if g.get('state') == 'inProgress'), None)
         
-        if not current_game:
+        if not current:
             await query.edit_message_text(
-                f"⚠️ **{team1_name} vs {team2_name}**\n\n"
-                f"Nenhum jogo em andamento no momento."
-            )
-            return
-        
-        game_id = current_game.get('id')
-        game_number = current_game.get('number', 1)
-        
-        # Buscar stats
-        stats = await api.get_live_stats(game_id)
-        
-        if not stats:
-            # Sem stats, mostrar info básica
-            await query.edit_message_text(
-                f"⚔️ **{team1_name} vs {team2_name}**\n"
-                f"**{league}** • Jogo {game_number}\n\n"
-                f"⚠️ Stats em tempo real não disponíveis\n"
-                f"(Jogo pode estar começando)",
+                f"⚠️ *{t1_name} vs {t2_name}*\n\nNenhum jogo rodando agora",
                 parse_mode='Markdown'
             )
             return
         
-        # Analisar
-        analysis = analyzer.analyze(stats)
+        game_id = current.get('id')
+        game_num = current.get('number', 1)
         
-        if not analysis:
+        # BUSCAR STATS AO VIVO
+        live_data = await api.get_live_window(game_id)
+        
+        if not live_data:
             await query.edit_message_text(
-                f"⚠️ **{team1_name} vs {team2_name}**\n\n"
-                f"Dados ainda processando..."
+                f"⚠️ *{t1_name} vs {t2_name}*\n\n"
+                f"Jogo {game_num} • Stats indisponíveis\n"
+                f"(Pode estar começando)",
+                parse_mode='Markdown'
             )
             return
         
-        # Criar mensagem com stats
-        text = f"⚔️ **{team1_name} vs {team2_name}**\n"
-        text += f"**{league}** • Jogo {game_number}\n\n"
+        # EXTRAIR STATS
+        stats = extractor.extract_stats(live_data)
         
-        text += "📊 **PLACAR**\n"
-        text += f"{analysis['blue_kills']} - {analysis['red_kills']}\n\n"
+        if not stats:
+            await query.edit_message_text(
+                f"⚠️ *{t1_name} vs {t2_name}*\n\n"
+                f"Dados ainda processando...\n"
+                f"Aguarde 2-3 min e clique Atualizar",
+                parse_mode='Markdown'
+            )
+            return
         
-        text += f"🔵 **{team1_name}** ({analysis['blue_prob']:.0f}%)\n"
-        text += f"💰 {analysis['blue_gold']:,} | "
-        text += f"🏰 {analysis['blue_towers']} | "
-        text += f"🐉 {analysis['blue_dragons']} | "
-        text += f"👹 {analysis['blue_barons']}\n\n"
+        # MONTAR MENSAGEM
+        text = f"⚔️ *{t1_name} vs {t2_name}*\n"
+        text += f"*{league}* • Jogo {game_num}\n\n"
         
-        text += f"🔴 **{team2_name}** ({analysis['red_prob']:.0f}%)\n"
-        text += f"💰 {analysis['red_gold']:,} | "
-        text += f"🏰 {analysis['red_towers']} | "
-        text += f"🐉 {analysis['red_dragons']} | "
-        text += f"👹 {analysis['red_barons']}\n\n"
+        text += "📊 *PLACAR*\n"
+        text += f"{stats['blue_kills']} - {stats['red_kills']}\n\n"
         
-        text += f"🎯 {analysis['advantage']}"
+        text += f"🔵 *{t1_name}* ({stats['blue_prob']:.0f}%)\n"
+        text += f"💰 {stats['blue_gold']:,} | "
+        text += f"🏰 {stats['blue_towers']} | "
+        text += f"🐉 {stats['blue_dragons']} | "
+        text += f"👹 {stats['blue_barons']}\n\n"
         
-        # Botão para atualizar
+        text += f"🔴 *{t2_name}* ({stats['red_prob']:.0f}%)\n"
+        text += f"💰 {stats['red_gold']:,} | "
+        text += f"🏰 {stats['red_towers']} | "
+        text += f"🐉 {stats['red_dragons']} | "
+        text += f"👹 {stats['red_barons']}\n\n"
+        
+        text += f"🎯 {stats['advantage']}"
+        
         keyboard = [[
             InlineKeyboardButton("🔄 Atualizar", callback_data=f"analyze_{event_id}")
         ]]
@@ -358,108 +454,36 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
     except Exception as e:
         await query.edit_message_text(f"❌ Erro: {str(e)}")
-        print(f"Erro detalhado: {e}")
+        print(f"Erro: {e}")
         import traceback
         traceback.print_exc()
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /help"""
+    """Ajuda"""
     await update.message.reply_text(
-        "🏆 *Bot LoL Esports - Ajuda*\n\n"
+        "🏆 *Bot LoL Esports v2*\n\n"
         "*Comandos:*\n"
-        "/live - Ver partidas ao vivo\n"
-        "/help - Esta mensagem\n"
-        "/debug - Ver dados brutos da API\n\n"
-        "*Ligas Monitoradas:*\n"
+        "/live - Jogos ao vivo\n"
+        "/help - Ajuda\n\n"
+        "*Ligas:*\n"
         "🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC • 🇺🇸 LCS • 🇧🇷 CBLOL",
         parse_mode='Markdown'
     )
 
-async def debug_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Mostra dados brutos da API para debug"""
-    msg = await update.message.reply_text("🔍 Buscando dados brutos...")
-    
-    try:
-        matches = await api.get_live_matches()
-        
-        if not matches:
-            await msg.edit_text("❌ Nenhuma partida ao vivo agora.")
-            return
-        
-        # Pegar primeiro jogo disponível
-        first_match = matches[0]
-        match_obj = first_match.get('match', {})
-        games = match_obj.get('games', [])
-        
-        current_game = next((g for g in games if g.get('state') == 'inProgress'), None)
-        
-        if not current_game:
-            await msg.edit_text("❌ Nenhum jogo em andamento.")
-            return
-        
-        game_id = current_game.get('id')
-        
-        # Buscar stats brutas
-        stats = await api.get_live_stats(game_id)
-        
-        if not stats:
-            await msg.edit_text("❌ Stats não disponíveis.")
-            return
-        
-        # Pegar último frame
-        frames = stats.get('frames', [])
-        if not frames:
-            await msg.edit_text("❌ Sem frames disponíveis.")
-            return
-        
-        latest = frames[-1]
-        
-        # Mostrar TODOS os campos disponíveis
-        blue = latest.get('blueTeam', {})
-        red = latest.get('redTeam', {})
-        
-        debug_text = "🔍 *CAMPOS DISPONÍVEIS NA API:*\n\n"
-        debug_text += "*🔵 Blue Team campos:*\n"
-        for key, value in blue.items():
-            if not isinstance(value, (list, dict)):
-                debug_text += f"`{key}`: {value}\n"
-        
-        debug_text += "\n*🔴 Red Team campos:*\n"
-        for key, value in red.items():
-            if not isinstance(value, (list, dict)):
-                debug_text += f"`{key}`: {value}\n"
-        
-        # Enviar em partes se for muito grande
-        if len(debug_text) > 4000:
-            debug_text = debug_text[:4000] + "\n...(truncado)"
-        
-        await msg.edit_text(debug_text, parse_mode='Markdown')
-        
-    except Exception as e:
-        await msg.edit_text(f"❌ Erro: {str(e)}")
-
-# ========================================
-# MAIN
-# ========================================
-
 def main():
     """Inicia o bot"""
-    print("🚀 Iniciando Bot LoL Esports - Telegram")
+    print("🚀 Bot LoL Esports v2 - COM DADOS REAIS")
     print("="*60)
     
-    # Criar application
     application = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    # Handlers
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("live", live))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("debug", debug_command))
     application.add_handler(CallbackQueryHandler(analyze_callback, pattern="^analyze_"))
     
-    # Rodar
-    print("✅ Bot online!")
-    application.run_polling()
+    print("✅ Bot iniciado!")
+    application.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
