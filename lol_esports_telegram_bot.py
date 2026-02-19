@@ -1,9 +1,3 @@
-"""
-Bot LoL Esports - TELEGRAM v2
-COM WEB SCRAPING DOS DADOS REAIS!
-Extrai direto da mesma fonte que lolesports.com usa
-"""
-
 import asyncio
 import aiohttp
 import os
