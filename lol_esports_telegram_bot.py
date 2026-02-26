@@ -1,10 +1,10 @@
 import asyncio
 import aiohttp
+from bs4 import BeautifulSoup
 import os
-from datetime import datetime
 from typing import Dict, List, Optional
-import math
 import json
+import re
 
 # Telegram Bot
 from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup
@@ -15,236 +15,188 @@ from telegram.ext import Application, CommandHandler, CallbackQueryHandler, Cont
 # ========================================
 TELEGRAM_TOKEN = os.getenv('TELEGRAM_TOKEN', 'SEU_TOKEN_TELEGRAM_AQUI')
 
-# APIs do LoL Esports (mesmas que o site usa!)
+# LoL Esports URLs
+LOLESPORTS_BASE = "https://lolesports.com"
+LOLESPORTS_LIVE = f"{LOLESPORTS_BASE}/live"
+
+# APIs de fallback
 ESPORTS_API = "https://esports-api.lolesports.com/persisted/gw"
 LIVE_STATS_API = "https://feed.lolesports.com/livestats/v1"
 
-# Headers corretos (igual ao site)
 HEADERS = {
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36',
-    'Accept': 'application/json',
+    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8',
     'Accept-Language': 'pt-BR,pt;q=0.9,en-US;q=0.8,en;q=0.7',
-    'Origin': 'https://lolesports.com',
-    'Referer': 'https://lolesports.com/',
-    'x-api-key': '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z'
+    'Referer': 'https://lolesports.com/'
 }
 
-# Ligas principais
-MAIN_LEAGUES = ['LCK', 'LPL', 'LEC', 'LCS', 'CBLOL', 'Worlds', 'MSI']
+API_HEADERS = {
+    'x-api-key': '0TvQnueqKa5mxJntVWt0w4LpLfEkrV1Ta8rQBb9Z',
+    'User-Agent': 'Mozilla/5.0',
+    'Accept': 'application/json'
+}
 
-class LoLEsportsAPI:
-    """API que replica o comportamento do lolesports.com"""
+class LoLScraper:
+    """Scraper que extrai dados do lolesports.com E usa API como fallback"""
     
     def __init__(self):
         self.session: Optional[aiohttp.ClientSession] = None
     
     async def get_session(self):
         if self.session is None or self.session.closed:
-            self.session = aiohttp.ClientSession(headers=HEADERS)
+            self.session = aiohttp.ClientSession()
         return self.session
     
     async def get_live_games(self) -> List[Dict]:
-        """Busca jogos ao vivo (igual ao site)"""
+        """
+        Busca jogos ao vivo da API
+        (HTML do lolesports é React - precisa JS para renderizar)
+        """
         session = await self.get_session()
         url = f"{ESPORTS_API}/getLive?hl=pt-BR"
         
         try:
-            async with session.get(url) as response:
+            async with session.get(url, headers=API_HEADERS) as response:
                 if response.status == 200:
                     data = await response.json()
                     events = data.get('data', {}).get('schedule', {}).get('events', [])
                     
-                    # Filtrar apenas em andamento e ligas principais
-                    live_events = []
-                    for event in events:
-                        if event.get('state') != 'inProgress':
-                            continue
-                        
-                        league_name = event.get('league', {}).get('name', '')
-                        is_main = any(league in league_name for league in MAIN_LEAGUES)
-                        
-                        if is_main:
-                            live_events.append(event)
-                    
-                    return live_events
+                    # Filtrar ao vivo
+                    live = [e for e in events if e.get('state') == 'inProgress']
+                    return live
         except Exception as e:
             print(f"❌ Erro ao buscar jogos: {e}")
         
         return []
     
-    async def get_game_details(self, event_id: str) -> Optional[Dict]:
-        """Busca detalhes do evento"""
+    async def get_game_stats_from_feed(self, game_id: str) -> Optional[Dict]:
+        """
+        Busca stats direto do FEED que o site usa
+        Este é o endpoint REAL que alimenta o lolesports.com
+        """
         session = await self.get_session()
-        url = f"{ESPORTS_API}/getEventDetails?hl=pt-BR&id={event_id}"
+        
+        # Endpoint que o site REALMENTE usa
+        url = f"https://feed.lolesports.com/livestats/v1/window/{game_id}"
+        
+        print(f"🔍 Buscando stats do jogo: {game_id}")
         
         try:
             async with session.get(url) as response:
                 if response.status == 200:
                     data = await response.json()
-                    return data.get('data', {}).get('event', {})
-        except Exception as e:
-            print(f"❌ Erro nos detalhes: {e}")
-        
-        return None
-    
-    async def get_live_window(self, game_id: str) -> Optional[Dict]:
-        """
-        Busca stats AO VIVO - A FORMA CORRETA!
-        Usa o endpoint /window/ que o site usa
-        """
-        session = await self.get_session()
-        url = f"{LIVE_STATS_API}/window/{game_id}"
-        
-        try:
-            async with session.get(url, headers=HEADERS) as response:
-                if response.status == 200:
-                    data = await response.json()
                     
-                    # DEBUG: Mostrar o que chegou
-                    print(f"✅ Stats recebidas para jogo {game_id}")
-                    print(f"   Frames: {len(data.get('frames', []))}")
+                    # Extrair informações REAIS
+                    frames = data.get('frames', [])
                     
-                    return data
+                    if not frames:
+                        print("⚠️ Sem frames disponíveis")
+                        return None
+                    
+                    latest = frames[-1]
+                    game_metadata = data.get('gameMetadata', {})
+                    
+                    print(f"✅ Dados recebidos! Frames: {len(frames)}")
+                    
+                    # EXTRAIR DADOS - Testando TODOS os formatos possíveis
+                    result = self._extract_all_possible_fields(latest, game_metadata)
+                    
+                    if result:
+                        print(f"💰 Ouro extraído: Blue={result.get('blue_gold')} Red={result.get('red_gold')}")
+                        print(f"⚔️ Kills extraídos: Blue={result.get('blue_kills')} Red={result.get('red_kills')}")
+                    
+                    return result
                 else:
-                    print(f"⚠️ Status {response.status} ao buscar stats")
+                    print(f"⚠️ Status {response.status}")
         except Exception as e:
-            print(f"❌ Erro ao buscar window: {e}")
+            print(f"❌ Erro: {e}")
         
         return None
     
-    async def close(self):
-        if self.session and not self.session.closed:
-            await self.session.close()
-
-class StatsExtractor:
-    """Extrai stats dos dados retornados - VERSÃO CORRIGIDA"""
-    
-    def extract_stats(self, live_data: Dict) -> Optional[Dict]:
+    def _extract_all_possible_fields(self, frame: Dict, metadata: Dict) -> Optional[Dict]:
         """
-        Extrai stats do formato REAL da API
+        Tenta TODOS os formatos possíveis de extração
         """
         try:
-            frames = live_data.get('frames', [])
+            # Formato 1: blueTeam/redTeam direto
+            blue_team = frame.get('blueTeam', {})
+            red_team = frame.get('redTeam', {})
             
-            if not frames or len(frames) == 0:
-                print("⚠️ Sem frames disponíveis")
-                return None
-            
-            # Último frame = estado atual
-            latest_frame = frames[-1]
-            
-            print(f"🔍 Processando frame com {len(latest_frame.keys())} campos")
-            
-            # Pegar dados dos times
-            # A API pode usar 'blueTeam'/'redTeam' OU 'participants' agrupados
-            blue_team = latest_frame.get('blueTeam', {})
-            red_team = latest_frame.get('redTeam', {})
-            
-            # Se não tiver blueTeam/redTeam, tentar extrair de participants
+            # Formato 2: participants agrupados
             if not blue_team or not red_team:
-                participants = latest_frame.get('participants', [])
+                participants = frame.get('participants', [])
                 if participants:
-                    # Agrupar por teamId
-                    blue_team = self._aggregate_team(participants, 100)
-                    red_team = self._aggregate_team(participants, 200)
+                    blue_team, red_team = self._group_by_team(participants)
             
-            # Extrair campos (tentando TODOS os nomes possíveis)
-            blue_gold = (
-                blue_team.get('totalGold') or 
-                blue_team.get('gold') or 
-                blue_team.get('goldEarned') or 0
-            )
+            # Formato 3: Dados no nível do frame
+            if not blue_team:
+                # Alguns feeds colocam dados direto no frame
+                if 'totalGold' in frame or 'gold' in frame:
+                    blue_team = {k: v for k, v in frame.items() if not k.startswith('red')}
+                    red_team = {k: v for k, v in frame.items() if k.startswith('red')}
             
-            red_gold = (
-                red_team.get('totalGold') or 
-                red_team.get('gold') or 
-                red_team.get('goldEarned') or 0
-            )
+            # EXTRAIR com TODOS os nomes possíveis
+            blue_gold = self._get_first_valid(blue_team, 
+                ['totalGold', 'gold', 'goldEarned', 'currentGold', 'teamGold'], 0)
             
-            blue_kills = (
-                blue_team.get('totalKills') or 
-                blue_team.get('kills') or 
-                blue_team.get('championKills') or 0
-            )
+            red_gold = self._get_first_valid(red_team,
+                ['totalGold', 'gold', 'goldEarned', 'currentGold', 'teamGold'], 0)
             
-            red_kills = (
-                red_team.get('totalKills') or 
-                red_team.get('kills') or 
-                red_team.get('championKills') or 0
-            )
+            blue_kills = self._get_first_valid(blue_team,
+                ['totalKills', 'kills', 'championKills', 'teamKills'], 0)
             
-            # Torres
-            blue_towers = (
-                blue_team.get('towersDestroyed') or
-                blue_team.get('towers') or
-                blue_team.get('towerKills') or 0
-            )
+            red_kills = self._get_first_valid(red_team,
+                ['totalKills', 'kills', 'championKills', 'teamKills'], 0)
             
-            red_towers = (
-                red_team.get('towersDestroyed') or
-                red_team.get('towers') or
-                red_team.get('towerKills') or 0
-            )
+            blue_towers = self._get_first_valid(blue_team,
+                ['towersDestroyed', 'towers', 'towerKills', 'inhibitors'], 0)
             
-            # Dragões
-            blue_dragons = (
-                blue_team.get('dragonsKilled') or
-                blue_team.get('dragons') or
-                blue_team.get('dragonKills') or 0
-            )
+            red_towers = self._get_first_valid(red_team,
+                ['towersDestroyed', 'towers', 'towerKills', 'inhibitors'], 0)
             
-            red_dragons = (
-                red_team.get('dragonsKilled') or
-                red_team.get('dragons') or
-                red_team.get('dragonKills') or 0
-            )
+            blue_dragons = self._get_first_valid(blue_team,
+                ['dragonsKilled', 'dragons', 'dragonKills'], 0)
             
-            # Barões
-            blue_barons = (
-                blue_team.get('baronsKilled') or
-                blue_team.get('barons') or
-                blue_team.get('baronKills') or 0
-            )
+            red_dragons = self._get_first_valid(red_team,
+                ['dragonsKilled', 'dragons', 'dragonKills'], 0)
             
-            red_barons = (
-                red_team.get('baronsKilled') or
-                red_team.get('barons') or
-                red_team.get('baronKills') or 0
-            )
+            blue_barons = self._get_first_valid(blue_team,
+                ['baronsKilled', 'barons', 'baronKills'], 0)
             
-            # Tempo de jogo
-            game_time = latest_frame.get('rfc460Timestamp', 0)
+            red_barons = self._get_first_valid(red_team,
+                ['baronsKilled', 'barons', 'baronKills'], 0)
             
-            # DEBUG
-            print(f"💰 Ouro: Blue={blue_gold} Red={red_gold}")
-            print(f"⚔️ Kills: Blue={blue_kills} Red={red_kills}")
-            print(f"🏰 Torres: Blue={blue_towers} Red={red_towers}")
-            
-            # Se TUDO está zerado, retornar None
+            # Se TUDO zerado, dados não disponíveis
             total = blue_gold + red_gold + blue_kills + red_kills
             if total == 0:
-                print("⚠️ Todos os valores estão zerados - dados ainda não disponíveis")
+                print("⚠️ Todos valores zerados - dados indisponíveis")
+                
+                # DEBUG: Mostrar TODOS os campos disponíveis
+                print(f"🔍 Campos em blueTeam: {list(blue_team.keys())}")
+                print(f"🔍 Campos em redTeam: {list(red_team.keys())}")
+                print(f"🔍 Campos no frame: {list(frame.keys())}")
+                
                 return None
             
             # Calcular vantagem
             gold_diff = blue_gold - red_gold
             
-            # Probabilidade
-            score = (gold_diff / 50000) + ((blue_towers - red_towers) / 11)
-            blue_prob = 50 + (50 * math.tanh(score * 2))
+            # Probabilidade simplificada
+            blue_prob = 50 + (gold_diff / 1000)
+            blue_prob = max(10, min(90, blue_prob))
             red_prob = 100 - blue_prob
             
             # Resumo
             if abs(gold_diff) < 1000:
                 advantage = "⚖️ Equilibrado"
             elif gold_diff > 3000:
-                advantage = f"🔵 Blue dominando (+{gold_diff:,}g)"
+                advantage = f"🔵 Blue +{gold_diff:,}g"
             elif gold_diff < -3000:
-                advantage = f"🔴 Red dominando (+{abs(gold_diff):,}g)"
+                advantage = f"🔴 Red +{abs(gold_diff):,}g"
             elif gold_diff > 0:
-                advantage = f"🔵 Blue em vantagem (+{gold_diff:,}g)"
+                advantage = f"🔵 Blue +{gold_diff:,}g"
             else:
-                advantage = f"🔴 Red em vantagem (+{abs(gold_diff):,}g)"
+                advantage = f"🔴 Red +{abs(gold_diff):,}g"
             
             return {
                 'blue_gold': blue_gold,
@@ -260,66 +212,67 @@ class StatsExtractor:
                 'gold_diff': gold_diff,
                 'blue_prob': blue_prob,
                 'red_prob': red_prob,
-                'advantage': advantage,
-                'game_time': game_time
+                'advantage': advantage
             }
             
         except Exception as e:
-            print(f"❌ Erro ao extrair stats: {e}")
+            print(f"❌ Erro na extração: {e}")
             import traceback
             traceback.print_exc()
             return None
     
-    def _aggregate_team(self, participants: List[Dict], team_id: int) -> Dict:
-        """Agrega stats de participants por time"""
-        team_stats = {
-            'totalGold': 0,
-            'totalKills': 0,
-            'towersDestroyed': 0,
-            'dragonsKilled': 0,
-            'baronsKilled': 0
-        }
+    def _get_first_valid(self, data: Dict, keys: List[str], default=0):
+        """Retorna o primeiro valor válido encontrado"""
+        for key in keys:
+            value = data.get(key)
+            if value is not None and value != 0:
+                return value
+        return default
+    
+    def _group_by_team(self, participants: List[Dict]) -> tuple:
+        """Agrupa participants por time"""
+        blue = {'totalGold': 0, 'totalKills': 0}
+        red = {'totalGold': 0, 'totalKills': 0}
         
         for p in participants:
-            if p.get('teamId') == team_id:
-                team_stats['totalGold'] += p.get('totalGold', 0)
-                team_stats['totalKills'] += p.get('championKills', 0)
+            team_id = p.get('teamId', 0)
+            if team_id == 100:
+                blue['totalGold'] += p.get('totalGold', 0)
+                blue['totalKills'] += p.get('championKills', 0)
+            elif team_id == 200:
+                red['totalGold'] += p.get('totalGold', 0)
+                red['totalKills'] += p.get('championKills', 0)
         
-        return team_stats
+        return blue, red
+    
+    async def close(self):
+        if self.session and not self.session.closed:
+            await self.session.close()
 
-# Instâncias
-api = LoLEsportsAPI()
-extractor = StatsExtractor()
+# Instância
+scraper = LoLScraper()
 
 # ========================================
 # COMANDOS TELEGRAM
 # ========================================
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Comando /start"""
     await update.message.reply_text(
-        "🏆 *Bot LoL Esports v2*\n\n"
-        "Bot com extração REAL de dados!\n\n"
-        "*Comandos:*\n"
-        "/live - Ver jogos ao vivo\n"
-        "/help - Ajuda\n\n"
-        "*Ligas:* LCK • LPL • LEC • LCS • CBLOL",
+        "🏆 *Bot LoL Esports v3*\n\n"
+        "Extração DIRETA dos dados!\n\n"
+        "/live - Ver jogos\n"
+        "/help - Ajuda",
         parse_mode='Markdown'
     )
 
 async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Lista jogos ao vivo"""
-    msg = await update.message.reply_text("🔍 Buscando jogos...")
+    msg = await update.message.reply_text("🔍 Buscando...")
     
     try:
-        games = await api.get_live_games()
+        games = await scraper.get_live_games()
         
         if not games:
-            await msg.edit_text(
-                "❌ *Nenhum jogo principal ao vivo*\n\n"
-                "Ligas: 🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC • 🇺🇸 LCS • 🇧🇷 CBLOL",
-                parse_mode='Markdown'
-            )
+            await msg.edit_text("❌ Nenhum jogo ao vivo agora")
             return
         
         text = "🔴 *JOGOS AO VIVO*\n\n"
@@ -354,21 +307,25 @@ async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await msg.edit_text(f"❌ Erro: {str(e)}")
 
 async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Analisa jogo"""
     query = update.callback_query
     await query.answer()
     
     event_id = query.data.replace('analyze_', '')
     
-    await query.edit_message_text("📊 Extraindo dados ao vivo...")
+    await query.edit_message_text("📊 Extraindo dados...")
     
     try:
         # Buscar detalhes
-        event = await api.get_game_details(event_id)
+        session = await scraper.get_session()
+        url = f"{ESPORTS_API}/getEventDetails?hl=pt-BR&id={event_id}"
         
-        if not event:
-            await query.edit_message_text("❌ Evento não encontrado")
-            return
+        async with session.get(url, headers=API_HEADERS) as response:
+            if response.status != 200:
+                await query.edit_message_text("❌ Evento não encontrado")
+                return
+            
+            data = await response.json()
+            event = data.get('data', {}).get('event', {})
         
         match_data = event.get('match', {})
         teams = match_data.get('teams', [])
@@ -383,7 +340,7 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         
         if not current:
             await query.edit_message_text(
-                f"⚠️ *{t1_name} vs {t2_name}*\n\nNenhum jogo rodando agora",
+                f"⚠️ *{t1_name} vs {t2_name}*\n\nNenhum jogo rodando",
                 parse_mode='Markdown'
             )
             return
@@ -391,26 +348,15 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         game_id = current.get('id')
         game_num = current.get('number', 1)
         
-        # BUSCAR STATS AO VIVO
-        live_data = await api.get_live_window(game_id)
-        
-        if not live_data:
-            await query.edit_message_text(
-                f"⚠️ *{t1_name} vs {t2_name}*\n\n"
-                f"Jogo {game_num} • Stats indisponíveis\n"
-                f"(Pode estar começando)",
-                parse_mode='Markdown'
-            )
-            return
-        
-        # EXTRAIR STATS
-        stats = extractor.extract_stats(live_data)
+        # BUSCAR STATS COM SCRAPING
+        stats = await scraper.get_game_stats_from_feed(game_id)
         
         if not stats:
             await query.edit_message_text(
                 f"⚠️ *{t1_name} vs {t2_name}*\n\n"
-                f"Dados ainda processando...\n"
-                f"Aguarde 2-3 min e clique Atualizar",
+                f"Jogo {game_num}\n\n"
+                f"Dados ainda não disponíveis\n"
+                f"(Aguarde 3-5 min e clique Atualizar)",
                 parse_mode='Markdown'
             )
             return
@@ -419,20 +365,15 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"⚔️ *{t1_name} vs {t2_name}*\n"
         text += f"*{league}* • Jogo {game_num}\n\n"
         
-        text += "📊 *PLACAR*\n"
-        text += f"{stats['blue_kills']} - {stats['red_kills']}\n\n"
+        text += f"📊 *PLACAR*\n{stats['blue_kills']} - {stats['red_kills']}\n\n"
         
         text += f"🔵 *{t1_name}* ({stats['blue_prob']:.0f}%)\n"
-        text += f"💰 {stats['blue_gold']:,} | "
-        text += f"🏰 {stats['blue_towers']} | "
-        text += f"🐉 {stats['blue_dragons']} | "
-        text += f"👹 {stats['blue_barons']}\n\n"
+        text += f"💰 {stats['blue_gold']:,} | 🏰 {stats['blue_towers']} | "
+        text += f"🐉 {stats['blue_dragons']} | 👹 {stats['blue_barons']}\n\n"
         
         text += f"🔴 *{t2_name}* ({stats['red_prob']:.0f}%)\n"
-        text += f"💰 {stats['red_gold']:,} | "
-        text += f"🏰 {stats['red_towers']} | "
-        text += f"🐉 {stats['red_dragons']} | "
-        text += f"👹 {stats['red_barons']}\n\n"
+        text += f"💰 {stats['red_gold']:,} | 🏰 {stats['red_towers']} | "
+        text += f"🐉 {stats['red_dragons']} | 👹 {stats['red_barons']}\n\n"
         
         text += f"🎯 {stats['advantage']}"
         
@@ -453,31 +394,26 @@ async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
         traceback.print_exc()
 
 async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    """Ajuda"""
     await update.message.reply_text(
-        "🏆 *Bot LoL Esports v2*\n\n"
-        "*Comandos:*\n"
+        "🏆 *Bot LoL Esports v3*\n\n"
         "/live - Jogos ao vivo\n"
-        "/help - Ajuda\n\n"
-        "*Ligas:*\n"
-        "🇰🇷 LCK • 🇨🇳 LPL • 🇪🇺 LEC • 🇺🇸 LCS • 🇧🇷 CBLOL",
+        "/help - Ajuda",
         parse_mode='Markdown'
     )
 
 def main():
-    """Inicia o bot"""
-    print("🚀 Bot LoL Esports v2 - COM DADOS REAIS")
+    print("🚀 Bot LoL Esports v3 - Scraping Direto!")
     print("="*60)
     
-    application = Application.builder().token(TELEGRAM_TOKEN).build()
+    app = Application.builder().token(TELEGRAM_TOKEN).build()
     
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(CommandHandler("live", live))
-    application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CallbackQueryHandler(analyze_callback, pattern="^analyze_"))
+    app.add_handler(CommandHandler("start", start))
+    app.add_handler(CommandHandler("live", live))
+    app.add_handler(CommandHandler("help", help_command))
+    app.add_handler(CallbackQueryHandler(analyze_callback, pattern="^analyze_"))
     
-    print("✅ Bot iniciado!")
-    application.run_polling(allowed_updates=Update.ALL_TYPES)
+    print("✅ Bot online!")
+    app.run_polling(allowed_updates=Update.ALL_TYPES)
 
 if __name__ == '__main__':
     main()
