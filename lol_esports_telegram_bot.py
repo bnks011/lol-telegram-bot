@@ -323,6 +323,9 @@ async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         matches = await extractor.get_live_matches()
         
+        print(f"\n📊 DEBUG LIVE:")
+        print(f"   Matches encontrados: {len(matches)}")
+        
         if not matches:
             await msg.edit_text(
                 "❌ Nenhum jogo ao vivo\n\n"
@@ -330,37 +333,67 @@ async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
             return
         
-        text = "🔴 *JOGOS AO VIVO*\n\n"
+        text = f"🔴 *JOGOS AO VIVO* ({len(matches)})\n\n"
         keyboard = []
         
-        for match in matches[:10]:
-            league = match.get('league', {}).get('name', 'Unknown')
+        for idx, match in enumerate(matches[:10]):
+            print(f"\n   Match {idx + 1}:")
+            
+            league = match.get('league', {})
+            league_name = league.get('name', 'Unknown League')
+            print(f"      Liga: {league_name}")
+            
             match_data = match.get('match', {})
             teams = match_data.get('teams', [])
+            print(f"      Times encontrados: {len(teams)}")
             
             if len(teams) >= 2:
-                t1 = teams[0].get('code', 'T1')
-                t2 = teams[1].get('code', 'T2')
-                event_id = match.get('id')
+                t1_code = teams[0].get('code', teams[0].get('name', 'Team1'))
+                t2_code = teams[1].get('code', teams[1].get('name', 'Team2'))
+                t1_name = teams[0].get('name', t1_code)
+                t2_name = teams[1].get('name', t2_code)
                 
-                text += f"*{league}*\n{t1} vs {t2}\n\n"
+                event_id = match.get('id', 'no-id')
                 
+                print(f"      {t1_code} vs {t2_code}")
+                print(f"      ID: {event_id}")
+                
+                # Adicionar ao texto
+                text += f"*{league_name}*\n"
+                text += f"{t1_code} vs {t2_code}\n"
+                text += f"ID: `{event_id}`\n\n"
+                
+                # Adicionar botão
                 keyboard.append([
                     InlineKeyboardButton(
-                        f"📊 {t1} vs {t2}",
+                        f"📊 {t1_code} vs {t2_code}",
                         callback_data=f"analyze_{event_id}"
                     )
                 ])
+            else:
+                print(f"      ⚠️ Times insuficientes: {teams}")
         
-        await msg.edit_text(
-            text,
-            parse_mode='Markdown',
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        print(f"\n   Total de botões: {len(keyboard)}")
+        print(f"   Texto montado: {len(text)} caracteres\n")
+        
+        if keyboard:
+            reply_markup = InlineKeyboardMarkup(keyboard)
+            await msg.edit_text(
+                text,
+                parse_mode='Markdown',
+                reply_markup=reply_markup
+            )
+        else:
+            await msg.edit_text(
+                f"⚠️ Encontrados {len(matches)} jogos mas sem dados dos times.\n"
+                f"Veja logs do Railway!"
+            )
         
     except Exception as e:
         await msg.edit_text(f"❌ Erro: {str(e)}")
-        print(f"Erro: {e}")
+        print(f"❌ Erro em live: {e}")
+        import traceback
+        traceback.print_exc()
 
 async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
