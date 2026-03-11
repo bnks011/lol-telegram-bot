@@ -323,77 +323,69 @@ async def live(update: Update, context: ContextTypes.DEFAULT_TYPE):
     try:
         matches = await extractor.get_live_matches()
         
-        print(f"\n📊 DEBUG LIVE:")
-        print(f"   Matches encontrados: {len(matches)}")
+        print(f"\n📊 DEBUG LIVE: {len(matches)} matches encontrados")
         
         if not matches:
-            await msg.edit_text(
-                "❌ Nenhum jogo ao vivo\n\n"
-                "Ligas principais: LCK, LPL, LEC, LCS, CBLOL"
-            )
+            await msg.edit_text("❌ Nenhum jogo ao vivo agora")
             return
         
-        text = f"🔴 *JOGOS AO VIVO* ({len(matches)})\n\n"
+        # Mensagem SIMPLES sem Markdown problemático
+        text = f"🔴 JOGOS AO VIVO ({len(matches)})\n\n"
         keyboard = []
         
         for idx, match in enumerate(matches[:10]):
-            print(f"\n   Match {idx + 1}:")
-            
             league = match.get('league', {})
-            league_name = league.get('name', 'Unknown League')
-            print(f"      Liga: {league_name}")
+            league_name = league.get('name', 'Unknown')
             
             match_data = match.get('match', {})
             teams = match_data.get('teams', [])
-            print(f"      Times encontrados: {len(teams)}")
+            
+            print(f"Match {idx+1}: {league_name} - {len(teams)} times")
             
             if len(teams) >= 2:
-                t1_code = teams[0].get('code', teams[0].get('name', 'Team1'))
-                t2_code = teams[1].get('code', teams[1].get('name', 'Team2'))
-                t1_name = teams[0].get('name', t1_code)
-                t2_name = teams[1].get('name', t2_code)
+                t1 = teams[0].get('code') or teams[0].get('name', 'T1')
+                t2 = teams[1].get('code') or teams[1].get('name', 'T2')
+                event_id = match.get('id', '')
                 
-                event_id = match.get('id', 'no-id')
+                # Texto SIMPLES
+                text += f"{league_name}\n"
+                text += f"{t1} vs {t2}\n\n"
                 
-                print(f"      {t1_code} vs {t2_code}")
-                print(f"      ID: {event_id}")
-                
-                # Adicionar ao texto
-                text += f"*{league_name}*\n"
-                text += f"{t1_code} vs {t2_code}\n"
-                text += f"ID: `{event_id}`\n\n"
-                
-                # Adicionar botão
+                # Botão
                 keyboard.append([
                     InlineKeyboardButton(
-                        f"📊 {t1_code} vs {t2_code}",
+                        f"📊 {t1} vs {t2}",
                         callback_data=f"analyze_{event_id}"
                     )
                 ])
-            else:
-                print(f"      ⚠️ Times insuficientes: {teams}")
+                
+                print(f"  Adicionado: {t1} vs {t2}")
         
-        print(f"\n   Total de botões: {len(keyboard)}")
-        print(f"   Texto montado: {len(text)} caracteres\n")
+        print(f"Total botões: {len(keyboard)}\n")
         
-        if keyboard:
-            reply_markup = InlineKeyboardMarkup(keyboard)
+        # Enviar SEM parse_mode se tiver problemas
+        try:
             await msg.edit_text(
                 text,
-                parse_mode='Markdown',
-                reply_markup=reply_markup
+                reply_markup=InlineKeyboardMarkup(keyboard) if keyboard else None
             )
-        else:
+        except Exception as e:
+            # Se falhar, enviar só texto
+            print(f"⚠️ Erro ao editar com botões: {e}")
             await msg.edit_text(
-                f"⚠️ Encontrados {len(matches)} jogos mas sem dados dos times.\n"
-                f"Veja logs do Railway!"
+                f"🔴 {len(matches)} jogos ao vivo\n\n"
+                f"Use /help para mais informações"
             )
         
     except Exception as e:
-        await msg.edit_text(f"❌ Erro: {str(e)}")
         print(f"❌ Erro em live: {e}")
         import traceback
         traceback.print_exc()
+        
+        try:
+            await msg.edit_text("❌ Erro ao buscar jogos")
+        except:
+            pass
 
 async def analyze_callback(update: Update, context: ContextTypes.DEFAULT_TYPE):
     query = update.callback_query
